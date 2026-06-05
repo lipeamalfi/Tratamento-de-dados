@@ -1,0 +1,512 @@
+import pandas as pd
+import numpy as np
+import os
+from unidecode import unidecode
+
+# CONFIGURAÇÕES E CONSTANTES
+
+CAMINHO_SAP         =  
+ARQUIVO_BASE_08     =  
+ARQUIVO_BASE_GERAL  =  
+CAMINHO_CARTEIRA    =  
+CAMINHO_INFO_COMP   =  
+CAMINHO_BASE_ANT    = 
+CAMINHO_SAIDA_08    = 
+CAMINHO_SAIDA_GERAL = 
+
+
+# UTILITÁRIO DE NORMALIZAÇÃO
+
+def norm(series: pd.Series) -> pd.Series:
+    """Minúsculo + sem acento + strip. Preserva NaN."""
+    return (
+        series.astype(str)
+        .str.strip()
+        .apply(lambda x: unidecode(x).lower() if x not in ('nan', 'None', '') else pd.NA)
+    )
+
+
+# NORMALIZAÇÃO DE COLUNAS
+
+NORMALIZAR_COLUNAS = {
+    'AtribuiÃ§Ã£o': 'Atribuição',
+    'NÂº doc.': 'Nº Doc',
+    'ReferÃªncia': 'Referência',
+    'VencLÃ­quid': 'VenciLiquid',
+    '        Mont.em MI': 'Mont. em MI',
+    'RazÃ£o': 'Razão',
+    'UsuÃ¡rio': 'Usuário',
+    'ReferÃªncia de pagamento': 'Referência de Pagamento',
+    ' NÃ­v.adv.': 'Nív.adv.',
+    'Atribuição': 'Atribuição',
+    'Nº doc.': 'Nº Doc',
+    'Referência': 'Referência',
+    'VencLíquid': 'VenciLiquid',
+    'Mont.em MI': 'Mont. em MI',
+    'Razão': 'Razão',
+    'Usuário': 'Usuário',
+    'Referência de pagamento': 'Referência de Pagamento',
+    'Nív.adv.': 'Nív.adv.'
+}
+
+COLUNAS_SAP = [
+    'Empr', 'Atribuição', 'Cliente', 'Nome', 'CNPJ', 'Cl',
+    'Nº Doc', 'Referência', 'Chv.ref.1', 'LNeg', 'Marca',
+    'Data doc.', 'VenciLiquid', 'Tip', 'C', 'DAtras',
+    'Mont. em MI', 'MoedI', 'DocCompens',
+    'Texto', 'Razão', 'Portador', 'Nív.adv.',
+    'Bloq.', 'CPgt', 'Dia1', 'Usuário', 'Data base',
+    'Referência de Pagamento', 'Estorno c/'
+]
+
+MAPA_MARCA_EMPRESA = {
+    1004: 'irn', 1007: 'santecorp', 1010: 'cpc',
+    1024: 'pretti', 1025: 'bioclinico', 1032: 'genesis'
+}
+
+MARCAS_PERMITIDAS_1001  = {'dayclinic', 'lafe', 'serdil', 'fertilidade'}
+MARCAS_PROIBIDAS_1000   = {'dayclinic', 'lafe', 'serdil', 'fertilidade',
+                            'irn', 'cpc', 'santecorp', 'pretti', 'bioclinico'}
+
+COMBINACOES_CLUSTER_VALIDAS = {
+    'check up' : {'check up', 'particular'},
+    'lare'     : {'lare', 'particular'},
+    'unidades' : {'unidades', 'particular'},
+    'hospitais': {'hospitais', 'unidades', 'particular'},
+}
+
+MARCAS_FORCAM_UNIDADES = {'cip', 'irn', 'cpc', 'santecorp', 'pretti', 'bioclinico', 'genesis'}
+TAMANHOS_REF_CIP       = {5, 6, 9}
+
+COLUNAS_BASE_08 = [
+    'Empr', 'Nome', 'Razão', 'Cliente',
+    'VenciLiquid', 'Atribuição', 'LNeg', 'DAtras'
+]
+
+REGRAS_IFRS9 = {
+    'CHECK UP' : [(1,30,0.05),(31,60,0.07),(61,90,0.10),(91,120,0.15),
+                  (121,150,0.45),(151,180,0.50),(181,210,0.60),(211,240,0.65),
+                  (241,270,0.70),(271,300,0.85),(301,330,0.85),(331,360,0.90),
+                  (361,720,1.00),(721,99999,1.00)],
+    'HOSPITAIS': [(1,30,0.01),(31,60,0.01),(61,90,0.01),(91,120,0.01),
+                  (121,150,0.15),(151,180,0.15),(181,210,0.50),(211,240,0.75),
+                  (241,270,0.75),(271,300,0.75),(301,330,0.85),(331,360,0.90),
+                  (361,720,1.00),(721,99999,1.00)],
+    'LARE'     : [(1,30,0.04),(31,60,0.07),(61,90,0.10),(91,120,0.15),
+                  (121,150,0.30),(151,180,0.70),(181,210,0.85),(211,240,0.85),
+                  (241,270,0.90),(271,300,0.90),(301,330,0.90),(331,360,1.00),
+                  (361,720,1.00),(721,99999,1.00)],
+    'PARTICULAR':[(1,30,0.05),(31,60,0.10),(61,90,0.15),(91,120,0.20),
+                  (121,150,0.35),(151,180,0.75),(181,210,0.85),(211,240,0.95),
+                  (241,270,1.00),(271,300,1.00),(301,330,1.00),(331,360,1.00),
+                  (361,720,1.00),(721,99999,1.00)]
+}
+
+
+ # CARREGAMENTO ÚNICO DOS ARQUIVOS AUXILIARES
+
+print("Carregando arquivos auxiliares...")
+
+raw_carteira = pd.read_excel(CAMINHO_CARTEIRA)
+raw_carteira.columns = raw_carteira.columns.str.strip()
+
+raw_loc_neg = pd.read_excel(CAMINHO_INFO_COMP, sheet_name='Loc. Neg')
+raw_loc_neg.columns = raw_loc_neg.columns.str.strip()
+
+raw_base_ant = pd.read_excel(CAMINHO_BASE_ANT, sheet_name='Base')
+raw_base_ant.columns = raw_base_ant.columns.str.strip()
+
+for col in ['Local de Neg', 'Marca', 'Marca2', 'Marca III', 'Descrição 2']:
+    if col in raw_loc_neg.columns:
+        raw_loc_neg[col] = norm(raw_loc_neg[col])
+
+for col in ['Conta', 'Segmento', 'Marca', 'Marca2', 'Marca III', 'CLUSTER IFRS9', 'LNeg']:
+    if col in raw_base_ant.columns:
+        raw_base_ant[col] = norm(raw_base_ant[col])
+
+for col in ['CÓDIGO', 'TIP CONVÊNIO', 'TIP CONVÊNIO HP', 'GRUPO DE CLIENTES',
+            'RAZÃO SOCIAL', 'NEGÓCIO MACRO', 'NEGÓCIO MICRO']:
+    if col in raw_carteira.columns:
+        raw_carteira[col] = norm(raw_carteira[col])
+
+
+ # FUNÇÕES DE TRATAMENTO
+
+ def ler_e_limpar(caminho_pasta: str, nome_arquivo: str, label: str) -> pd.DataFrame:
+    print(f"\n{'═'*55}")
+    print(f"  LENDO E LIMPANDO: {label}")
+    print(f"{'═'*55}")
+    caminho = os.path.join(caminho_pasta, nome_arquivo)
+    df = pd.read_csv(caminho, sep='\t', skiprows=8, encoding='latin1', engine='python')
+    print(f"[{label}] Leitura:        {len(df):>10,} linhas brutas")
+
+    df.columns = df.columns.str.strip()
+    df = df.rename(columns=NORMALIZAR_COLUNAS)
+    df = df[COLUNAS_SAP].copy()
+    df = df[df['Empr'].notna()]
+    df = df[df['Empr'] != 'Empr']
+    df['Marca'] = pd.NA
+    df['Tipo de Faturamento'] = pd.NA
+
+    df['Empr'] = (
+        df['Empr'].astype(str).str.strip()
+        .str.replace('.0', '', regex=False).astype(int)
+    )
+    #Exclusão da conta 1103100020 — PRÉVIA APENAS, NÃO EXECUTAR NO FECHAMENTO
+    df = df[df['Empr'] != 1103100020]
+
+    for col in ['Data doc.', 'Data base']:
+        df[col] = pd.to_datetime(
+            df[col].astype(str).str.replace('.', '/', regex=False),
+            dayfirst=True, errors='coerce'
+        )
+
+    cliente_num = pd.to_numeric(df['Cliente'], errors='coerce')
+    num_doc = df['Nº Doc'].astype(str).str.strip().str.upper()
+    cond = (cliente_num > 4_000_000_000) | (cliente_num == 500) | (num_doc == 'DV')
+    df['Tipo de Faturamento'] = np.where(cond, 'Particular', 'Fatura')
+
+    print(f"[{label}] Após limpeza:   {len(df):>10,} linhas")
+    return df
+
+
+def agregar_08(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Agrega Base 08 pelas 8 colunas chave, somando Mont. em MI."""
+    df_agr = (
+        df[COLUNAS_BASE_08 + ['Mont. em MI']]
+        .groupby(COLUNAS_BASE_08, dropna=False)
+        .agg(Valor=('Mont. em MI', 'sum'))
+        .reset_index()
+        .rename(columns={'Valor': 'Mont. em MI'})
+    )
+    print(f"[{label}] Agregação:      {len(df):>10,} → {len(df_agr):,} linhas "
+          f"({len(df) - len(df_agr):,} comprimidas)")
+    print(f"[{label}] Mont. em MI:    {df_agr['Mont. em MI'].sum():>15,.2f}")
+    return df_agr
+
+def criar_nulos(df):
+    colunas = [
+        'CNPJ', 'Cl', 'Nº Doc', 'Referência', 'Chv.ref.1', 'Marca',
+        'Data doc.', 'Tip', 'C', 'MoedI', 'DocCompens',
+        'Texto', 'Portador', 'Nív.adv.',
+        'Bloq.', 'CPgt', 'Dia1', 'Usuário', 'Data base',
+        'Referência de Pagamento', 'Estorno c/',
+        'Tipo de Faturamento', 'ID Unidade'
+    ]
+
+    df[colunas] = 0
+
+    return df
+
+
+def marcar_campos(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Aplica todo o pipeline de marcação de campos."""
+    print(f"\n{'─'*55}")
+    print(f"  MARCANDO CAMPOS: {label}")
+    print(f"{'─'*55}")
+
+    # ── Grupo de Clientes ──────────────────────────────────────────────────
+    carteira = raw_carteira.copy()
+    carteira['CÓDIGO'] = pd.to_numeric(carteira['CÓDIGO'], errors='coerce').astype('Int64')
+    carteira = carteira.drop_duplicates(subset=['CÓDIGO'])
+    carteira['CÓDIGO'] = carteira['CÓDIGO'].astype(str)
+    df['Cliente'] = df['Cliente'].astype(str)
+    df = df.merge(
+        carteira[['CÓDIGO', 'GRUPO DE CLIENTES', 'RAZÃO SOCIAL']],
+        how='left', left_on='Cliente', right_on='CÓDIGO'
+    )
+    df['Grupo de Clientes'] = np.where(
+        df['Tipo de Faturamento'] == 'Particular', 'particular', df['GRUPO DE CLIENTES']
+    )
+    df['Grupo de Clientes'] = df['Grupo de Clientes'].fillna(df['RAZÃO SOCIAL'])
+    df.drop(columns=['CÓDIGO', 'GRUPO DE CLIENTES', 'RAZÃO SOCIAL'], inplace=True)
+
+    # ── Marca ──────────────────────────────────────────────────────────────
+    df.loc[df['Empr'].isin(MAPA_MARCA_EMPRESA), 'Marca'] = df['Empr'].map(MAPA_MARCA_EMPRESA)
+
+    df['ID Unidade'] = (
+        df['Referência de Pagamento'].astype(str).str.strip()
+        .str.lstrip('0').str[:3].str.strip()
+    )
+
+    dxp_lneg = (
+        raw_loc_neg[['Local de Neg', 'Marca']].drop_duplicates('Local de Neg')
+        .rename(columns={'Marca': '_Marca_lneg'})
+    )
+    df['LNeg'] = norm(df['LNeg'])
+    dxp_lneg['Local de Neg'] = dxp_lneg['Local de Neg'].astype(str)
+    df = df.merge(dxp_lneg, how='left', left_on='LNeg', right_on='Local de Neg')
+    mask = df['Empr'].isin([1000, 1001]) & df['Marca'].isna()
+    df.loc[mask, 'Marca'] = df.loc[mask, '_Marca_lneg']
+    df.drop(columns=['Local de Neg', '_Marca_lneg'], inplace=True)
+
+    dxp_unidade = (
+        raw_loc_neg[['ID Unidade', 'Marca2']].drop_duplicates('ID Unidade')
+        .rename(columns={'Marca2': '_Marca_unidade'})
+    )
+    dxp_unidade['ID Unidade'] = dxp_unidade['ID Unidade'].astype(str).str.strip()
+    df = df.merge(dxp_unidade, how='left', on='ID Unidade')
+    mask = df['Empr'].isin([1000, 1001]) & df['Marca'].isna()
+    df.loc[mask, 'Marca'] = df.loc[mask, '_Marca_unidade']
+    df.drop(columns=['_Marca_unidade'], inplace=True)
+
+    df.loc[(df['Empr'] == 1001) & df['Marca'].isna(), 'Marca'] = 'dayclinic'
+    df.loc[(df['Empr'] == 1000) & df['Marca'].isna(), 'Marca'] = 'fleury'
+    df['Marca'] = norm(df['Marca'])
+
+    df.loc[
+        (df['Empr'] == 1000) & (df['ID Unidade'] == '578') & (df['Marca'] == 'genesis'),
+        'Marca'
+    ] = 'fleury'
+
+    ref_len = df['Referência de Pagamento'].astype(str).str.strip().str.len()
+    mask_cip = (df['Empr'] == 1000) & (ref_len.isin(TAMANHOS_REF_CIP)) & (df['Marca'] != 'sao lucas')
+    df.loc[mask_cip, 'Marca'] = 'cip'
+    print(f"[{label}] Marca 6A (CIP): {mask_cip.sum():>10,} marcados")
+
+    mask_1001 = (df['Empr'] == 1001) & (~df['Marca'].isin(MARCAS_PERMITIDAS_1001))
+    df.loc[mask_1001, 'Marca'] = 'dayclinic'
+    print(f"[{label}] Marca 6B:       {mask_1001.sum():>10,} → dayclinic")
+
+    mask_1000 = (df['Empr'] == 1000) & (df['Marca'].isin(MARCAS_PROIBIDAS_1000))
+    df.loc[mask_1000, 'Marca'] = 'fleury'
+    print(f"[{label}] Marca 6C:       {mask_1000.sum():>10,} → fleury")
+
+    # ── Segmento ───────────────────────────────────────────────────────────
+    df['Segmento'] = pd.NA
+
+    df_aux_desc = (
+        raw_loc_neg[['ID Unidade', 'Descrição 2']].drop_duplicates('ID Unidade').copy()
+    )
+    df_aux_desc['ID Unidade'] = df_aux_desc['ID Unidade'].astype(str).str.strip()
+    df['ID Unidade'] = df['ID Unidade'].astype(str).str.strip()
+
+    mask_p1 = (df['Tipo de Faturamento'] == 'Particular') & df['Segmento'].isna()
+    df.loc[mask_p1, 'Segmento'] = df_aux_desc.set_index('ID Unidade').reindex(
+        df.loc[mask_p1, 'ID Unidade'].values
+    )['Descrição 2'].values
+    print(f"[{label}] Seg P1:         {mask_p1.sum():>10,} candidatos | {df['Segmento'].notna().sum():,} preenchidos | {df['Segmento'].isna().sum():,} nulos")
+
+    antes = df['Segmento'].isna().sum()
+    seg_hist = raw_base_ant[['Conta', 'Segmento']].copy()
+    seg_hist['Conta'] = seg_hist['Conta'].astype(str).str.strip()
+    seg_hist['Segmento'] = (
+        seg_hist['Segmento'].astype(str).str.strip()
+        .replace({'nan': pd.NA, 'None': pd.NA, '': pd.NA})
+    )
+    seg_hist = (
+        seg_hist.dropna(subset=['Segmento'])
+        .sort_values('Segmento', ascending=False)
+        .drop_duplicates(subset='Conta', keep='first')
+    )
+    assert seg_hist['Conta'].is_unique, "[ERRO] seg_hist duplicatas após drop_duplicates!"
+    df['Cliente'] = df['Cliente'].astype(str).str.strip()
+    mask_nulo_p2 = df['Segmento'].isna()
+    df.loc[mask_nulo_p2, 'Segmento'] = df.loc[mask_nulo_p2, 'Cliente'].map(
+        seg_hist.set_index('Conta')['Segmento']
+    ).values
+    print(f"[{label}] Seg P2:         {antes - df['Segmento'].isna().sum():>10,} preenchidos | {df['Segmento'].isna().sum():,} nulos")
+
+    mask_p3 = (df['Tipo de Faturamento'] == 'Particular') & df['Segmento'].isna()
+    df.loc[mask_p3, 'Segmento'] = 'unidades'
+    print(f"[{label}] Seg P3:         {mask_p3.sum():>10,} preenchidos | {df['Segmento'].isna().sum():,} nulos")
+
+    antes = df['Segmento'].isna().sum()
+    col_convenio = None
+    for candidato in ['TIP CONVÊNIO', 'TIPO DE CONVÊNIO', 'Tipo de Convênio',
+                      'TIPO CONVÊNIO', 'Tipo Convênio', 'TIP CONVENIO']:
+        if candidato in raw_carteira.columns:
+            col_convenio = candidato
+            break
+    if col_convenio is None:
+        print(f"[{label}] AVISO: coluna de convênio não encontrada.")
+    else:
+        cart = raw_carteira[['CÓDIGO', col_convenio]].copy()
+        cart['CÓDIGO'] = pd.to_numeric(cart['CÓDIGO'], errors='coerce').astype('Int64').astype(str).str.strip()
+        cart = cart.drop_duplicates(subset='CÓDIGO')
+        mask_nulo_p4 = df['Segmento'].isna()
+        df.loc[mask_nulo_p4, 'Segmento'] = df.loc[mask_nulo_p4, 'Cliente'].map(
+            cart.set_index('CÓDIGO')[col_convenio]
+        ).values
+        print(f"[{label}] Seg P4:         {antes - df['Segmento'].isna().sum():>10,} preenchidos | {df['Segmento'].isna().sum():,} nulos")
+
+    restantes = df['Segmento'].isna().sum()
+    df.loc[df['Segmento'].isna(), 'Segmento'] = 'unidades'
+    print(f"[{label}] Seg Fallback:   {restantes:>10,} preenchidos")
+
+    df['Segmento'] = norm(df['Segmento'])
+
+    mask_checkup = (df['Segmento'] == 'check up') & (df['Marca'] != 'fleury')
+    df.loc[mask_checkup, 'Segmento'] = 'unidades'
+    print(f"[{label}] Seg CheckUp:    {mask_checkup.sum():>10,} corrigidos")
+
+    df['LNeg'] = norm(df['LNeg'])
+    mask_hosp = df['LNeg'].str.startswith('h') | (df['LNeg'] == 'a117')
+    df.loc[mask_hosp, 'Segmento'] = 'hospitais'
+    print(f"[{label}] Seg Hospitais:  {mask_hosp.sum():>10,} marcados")
+
+    mask_mu = df['Marca'].isin(MARCAS_FORCAM_UNIDADES)
+    df.loc[mask_mu, 'Segmento'] = 'unidades'
+    print(f"[{label}] Seg Marcas→Un.: {mask_mu.sum():>10,} corrigidos")
+
+    mask_smd = df['Segmento'] == 'smd'
+    df.loc[mask_smd, 'Segmento'] = 'lare'
+    print(f"[{label}] Seg SMD→lare:   {mask_smd.sum():>10,} corrigidos")
+
+    # ── Marca II, Hospitais, Marca III ─────────────────────────────────────
+    df['Marca II'] = (
+        df['Segmento'].fillna('').str.strip() + ' ' +
+        df['Marca'].fillna('').str.strip()
+    ).str.strip()
+
+    mask_hosp_aj = df['Marca II'].isin(['hospitais a+ba', 'hospitais felippe mattoso'])
+    df.loc[mask_hosp_aj, 'Segmento'] = 'unidades'
+    df['Marca II'] = (
+        df['Segmento'].fillna('').str.strip() + ' ' +
+        df['Marca'].fillna('').str.strip()
+    ).str.strip()
+
+    df_aux_m3 = (
+        raw_base_ant[['Marca2', 'Marca III']].drop_duplicates('Marca2')
+        .rename(columns={'Marca2': 'Marca II'})
+    )
+    df['Marca II'] = norm(df['Marca II'])
+    df_aux_m3['Marca II'] = norm(df_aux_m3['Marca II'])
+    df = df.merge(df_aux_m3, how='left', on='Marca II')
+
+    # ── Cluster ────────────────────────────────────────────────────────────
+    df['Cluster'] = pd.NA
+    df.loc[df['Tipo de Faturamento'] == 'Particular', 'Cluster'] = 'particular'
+    print(f"[{label}] Cluster Part.:  {(df['Cluster'] == 'particular').sum():>10,} linhas")
+
+    antes = df['Cluster'].isna().sum()
+    df_aux_cl = (
+        raw_base_ant[['Conta', 'CLUSTER IFRS9']].dropna(subset=['CLUSTER IFRS9'])
+        .drop_duplicates('Conta')
+    )
+    df_aux_cl['Conta'] = df_aux_cl['Conta'].astype(str).str.strip()
+    df = df.merge(
+        df_aux_cl.rename(columns={'CLUSTER IFRS9': '_Cluster_hist', 'Conta': '_Conta_hist'}),
+        left_on='Cliente', right_on='_Conta_hist', how='left'
+    )
+    mask_nulo_cl = df['Cluster'].isna()
+    df.loc[mask_nulo_cl, 'Cluster'] = df.loc[mask_nulo_cl, '_Cluster_hist']
+    df.drop(columns=['_Conta_hist', '_Cluster_hist'], inplace=True)
+    print(f"[{label}] Cluster Hist.:  {antes - df['Cluster'].isna().sum():>10,} preenchidos")
+
+    df['Cluster'] = norm(df['Cluster'])
+    mask_smd_cl = df['Cluster'] == 'smd'
+    df.loc[mask_smd_cl, 'Cluster'] = 'lare'
+    print(f"[{label}] Cluster SMD→lr: {mask_smd_cl.sum():>10,} corrigidos")
+
+    df['Cluster'] = df['Cluster'].fillna(df['Segmento'])
+    if df['Cluster'].isna().any():
+        raise ValueError(f"[{label}] Cluster possui {df['Cluster'].isna().sum()} nulos após fallback.")
+
+    mask_valida = pd.Series(False, index=df.index)
+    for seg, clusters_ok in COMBINACOES_CLUSTER_VALIDAS.items():
+        mask_valida |= (df['Segmento'] == seg) & (df['Cluster'].isin(clusters_ok))
+    corr_cl = (~mask_valida).sum()
+    df.loc[~mask_valida, 'Cluster'] = df.loc[~mask_valida, 'Segmento']
+    print(f"[{label}] Cluster Valid.: {corr_cl:>10,} corrigidos")
+
+    # ── Linha DRE e Atribuição II ──────────────────────────────────────────
+    cluster_str = df['Cluster'].astype(str).str.strip().replace(['nan', 'None', ''], np.nan)
+    df['Linha DRE'] = np.where(cluster_str == 'unidades', 'Glosa', 'IFRS9')
+    df['Atribuição II'] = np.where(
+        df['C'].astype(str).str.strip().isin(['6', '8', 'D']), 'Glosa', 'Inadimplencia'
+    )
+
+    # ── Montante e DAtras ──────────────────────────────────────────────────
+    df['Mont. em MI'] = pd.to_numeric(
+        df['Mont. em MI'].astype(str).str.strip()
+        .str.replace('.', '', regex=False).str.replace(',', '.', regex=False),
+        errors='coerce'
+    )
+    df['DAtras'] = pd.to_numeric(
+        df['DAtras'].astype(str).str.strip().str.replace('.', '', regex=False),
+        errors='coerce'
+    )
+    df['Conta_razao'] = df['Razão'].astype(str).str.strip().str[-3:]
+    mask_016 = (
+        (df['Conta_razao'] == '016') &
+        (df['Mont. em MI'] < 0) &
+        (df['DAtras'].between(1, 30))
+    )
+    df.loc[mask_016, 'DAtras'] = -1
+    print(f"[{label}] Conta 016:      {mask_016.sum():>10,} DAtras → -1")
+
+    # ── Aging ──────────────────────────────────────────────────────────────
+    d = df['DAtras']
+    cond_aging   = [d <= 0, d.between(1,30), d.between(31,60), d.between(61,90),
+                    d.between(91,120), d.between(121,180), d.between(181,360),
+                    d.between(361,720), d >= 721]
+    labels_aging = ['1 - A VENCER','2 - DE 1 A 30','3 - DE 31 A 60','4 - DE 61 A 90',
+                    '5 - DE 91 A 120','6 - DE 121 A 180','7 - DE 181 A 360',
+                    '8 - DE 361 A 720','9 - ACIMA DE 720 DIAS']
+    cond_ifrs9   = [d <= 0, d.between(1,30), d.between(31,60), d.between(61,90),
+                    d.between(91,120), d.between(121,150), d.between(151,180),
+                    d.between(181,210), d.between(211,240), d.between(241,270),
+                    d.between(271,300), d.between(301,330), d.between(331,360),
+                    d.between(361,720), d >= 721]
+    labels_ifrs9 = ['01 - A VENCER','02 - DE 1 A 30','03 - DE 31 A 60','04 - DE 61 A 90',
+                    '05 - DE 91 A 120','06 - DE 121 A 150','07 - DE 151 A 180',
+                    '08 - DE 181 A 210','09 - DE 211 A 240','10 - DE 241 A 270',
+                    '11 - DE 271 A 300','12 - DE 301 A 330','13 - DE 331 A 360',
+                    '14 - DE 361 A 720','15 - ACIMA DE 720 DIAS']
+    df['Aging']       = np.select(cond_aging,  labels_aging,  default='Valor inválido')
+    df['Aging_IFRS9'] = np.select(cond_ifrs9,  labels_ifrs9,  default='VALOR INVÁLIDO')
+
+    # ── Valor Provisionado ─────────────────────────────────────────────────
+    cluster_unid = df['Cluster'] == 'unidades'
+    df['PJ'] = np.select(
+        [cluster_unid & d.between(121,180), cluster_unid & d.between(181,360),
+         cluster_unid & d.between(361,720), cluster_unid & (d > 720)],
+        [0.15, 0.50, 0.85, 1.00], default=0
+    )
+    df['Valor_Provisionado'] = df['Mont. em MI'] * df['PJ']
+    df = df.drop(columns=['PJ'])
+
+    # ── Provisão IFRS9 ─────────────────────────────────────────────────────
+    def get_percentual(cluster, dias):
+        cluster = str(cluster).strip().upper()
+        if cluster not in REGRAS_IFRS9 or dias <= 0:
+            return 0
+        for faixa in REGRAS_IFRS9[cluster]:
+            if faixa[0] <= dias <= faixa[1]:
+                return faixa[2]
+        return 0
+
+    df['Cluster_upper'] = df['Cluster'].astype(str).str.strip().str.upper()
+    df['Perc_IFRS9'] = df.apply(lambda x: get_percentual(x['Cluster_upper'], x['DAtras']), axis=1)
+    df['Provisão IFRS9 (AF)'] = df['Mont. em MI'] * df['Perc_IFRS9']
+    df = df.drop(columns=['Cluster_upper'])
+
+    print(f"[{label}] Linhas finais:  {len(df):>10,}")
+    print(f"[{label}] Mont. em MI:    {df['Mont. em MI'].sum():>15,.2f}")
+    return df
+
+
+# PROCESSAMENTO BASE 08
+
+df_08 = ler_e_limpar(CAMINHO_SAP, ARQUIVO_BASE_08, 'BASE 08')
+df_08 = agregar_08(df_08, 'BASE 08')
+df_08 = criar_nulos(df_08,'BASE 08')
+df_08 = marcar_campos(df_08, 'BASE 08')
+
+df_08.to_excel(CAMINHO_SAIDA_08, index=False)
+print(f"\n Base 08 exportada em: {CAMINHO_SAIDA_08}")
+print(f"   Linhas: {len(df_08):,} | Colunas: {len(df_08.columns)}")
+print(f"   Mont. em MI total: {df_08['Mont. em MI'].sum():,.2f}")
+
+
+# PROCESSAMENTO BASE GERAL
+
+df_geral = ler_e_limpar(CAMINHO_SAP, ARQUIVO_BASE_GERAL, 'GERAL')
+df_geral = marcar_campos(df_geral, 'GERAL')
+
+df_geral.to_excel(CAMINHO_SAIDA_GERAL, index=False)
+print(f"\n Base Geral exportada em: {CAMINHO_SAIDA_GERAL}")
+print(f"   Linhas: {len(df_geral):,} | Colunas: {len(df_geral.columns)}")
+print(f"   Mont. em MI total: {df_geral['Mont. em MI'].sum():,.2f}")
+
